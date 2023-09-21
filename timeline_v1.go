@@ -2,85 +2,16 @@ package twitterscraper
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// timeline JSON object
-type timeline struct {
+// legacy timeline JSON object
+type timelineV1 struct {
 	GlobalObjects struct {
-		Tweets map[string]struct {
-			ConversationIDStr string `json:"conversation_id_str"`
-			CreatedAt         string `json:"created_at"`
-			FavoriteCount     int    `json:"favorite_count"`
-			FullText          string `json:"full_text"`
-			Entities          struct {
-				Hashtags []struct {
-					Text string `json:"text"`
-				} `json:"hashtags"`
-				Media []struct {
-					MediaURLHttps string `json:"media_url_https"`
-					Type          string `json:"type"`
-					URL           string `json:"url"`
-				} `json:"media"`
-				URLs []struct {
-					ExpandedURL string `json:"expanded_url"`
-					URL         string `json:"url"`
-				} `json:"urls"`
-			} `json:"entities"`
-			ExtendedEntities struct {
-				Media []struct {
-					IDStr                    string `json:"id_str"`
-					MediaURLHttps            string `json:"media_url_https"`
-					ExtSensitiveMediaWarning struct {
-						AdultContent    bool `json:"adult_content"`
-						GraphicViolence bool `json:"graphic_violence"`
-						Other           bool `json:"other"`
-					} `json:"ext_sensitive_media_warning"`
-					Type      string `json:"type"`
-					URL       string `json:"url"`
-					VideoInfo struct {
-						Variants []struct {
-							Bitrate int    `json:"bitrate,omitempty"`
-							URL     string `json:"url"`
-						} `json:"variants"`
-					} `json:"video_info"`
-				} `json:"media"`
-			} `json:"extended_entities"`
-			InReplyToStatusIDStr string    `json:"in_reply_to_status_id_str"`
-			Place                Place     `json:"place"`
-			ReplyCount           int       `json:"reply_count"`
-			RetweetCount         int       `json:"retweet_count"`
-			RetweetedStatusIDStr string    `json:"retweeted_status_id_str"`
-			QuotedStatusIDStr    string    `json:"quoted_status_id_str"`
-			Time                 time.Time `json:"time"`
-			UserIDStr            string    `json:"user_id_str"`
-		} `json:"tweets"`
-		Users map[string]struct {
-			CreatedAt   string `json:"created_at"`
-			Description string `json:"description"`
-			Entities    struct {
-				URL struct {
-					Urls []struct {
-						ExpandedURL string `json:"expanded_url"`
-					} `json:"urls"`
-				} `json:"url"`
-			} `json:"entities"`
-			FavouritesCount      int      `json:"favourites_count"`
-			FollowersCount       int      `json:"followers_count"`
-			FriendsCount         int      `json:"friends_count"`
-			IDStr                string   `json:"id_str"`
-			ListedCount          int      `json:"listed_count"`
-			Name                 string   `json:"name"`
-			Location             string   `json:"location"`
-			PinnedTweetIdsStr    []string `json:"pinned_tweet_ids_str"`
-			ProfileBannerURL     string   `json:"profile_banner_url"`
-			ProfileImageURLHTTPS string   `json:"profile_image_url_https"`
-			Protected            bool     `json:"protected"`
-			ScreenName           string   `json:"screen_name"`
-			StatusesCount        int      `json:"statuses_count"`
-			Verified             bool     `json:"verified"`
-		} `json:"users"`
+		Tweets map[string]legacyTweet `json:"tweets"`
+		Users  map[string]legacyUser  `json:"users"`
 	} `json:"globalObjects"`
 	Timeline struct {
 		Instructions []struct {
@@ -152,18 +83,21 @@ type timeline struct {
 	} `json:"timeline"`
 }
 
-func (timeline *timeline) parseTweet(id string) *Tweet {
+func (timeline *timelineV1) parseTweet(id string) *Tweet {
 	if tweet, ok := timeline.GlobalObjects.Tweets[id]; ok {
 		username := timeline.GlobalObjects.Users[tweet.UserIDStr].ScreenName
+		name := timeline.GlobalObjects.Users[tweet.UserIDStr].Name
 		tw := &Tweet{
-			ID:           id,
-			Likes:        tweet.FavoriteCount,
-			PermanentURL: fmt.Sprintf("https://twitter.com/%s/status/%s", username, id),
-			Replies:      tweet.ReplyCount,
-			Retweets:     tweet.RetweetCount,
-			Text:         tweet.FullText,
-			UserID:       tweet.UserIDStr,
-			Username:     username,
+			ID:             id,
+			ConversationID: tweet.ConversationIDStr,
+			Likes:          tweet.FavoriteCount,
+			Name:           name,
+			PermanentURL:   fmt.Sprintf("https://twitter.com/%s/status/%s", username, id),
+			Replies:        tweet.ReplyCount,
+			Retweets:       tweet.RetweetCount,
+			Text:           tweet.FullText,
+			UserID:         tweet.UserIDStr,
+			Username:       username,
 		}
 
 		tm, err := time.Parse(time.RubyDate, tweet.CreatedAt)
@@ -179,18 +113,33 @@ func (timeline *timeline) parseTweet(id string) *Tweet {
 		if tweet.QuotedStatusIDStr != "" {
 			tw.IsQuoted = true
 			tw.QuotedStatus = timeline.parseTweet(tweet.QuotedStatusIDStr)
+			tw.QuotedStatusID = tweet.QuotedStatusIDStr
 		}
 		if tweet.InReplyToStatusIDStr != "" {
 			tw.IsReply = true
 			tw.InReplyToStatus = timeline.parseTweet(tweet.InReplyToStatusIDStr)
+			tw.InReplyToStatusID = tweet.InReplyToStatusIDStr
 		}
 		if tweet.RetweetedStatusIDStr != "" {
 			tw.IsRetweet = true
 			tw.RetweetedStatus = timeline.parseTweet(tweet.RetweetedStatusIDStr)
+			tw.RetweetedStatusID = tweet.RetweetedStatusIDStr
+		}
+
+		if tweet.SelfThread.IDStr == id {
+			tw.IsSelfThread = true
+		}
+
+		if tweet.Views.Count != "" {
+			views, viewsErr := strconv.Atoi(tweet.Views.Count)
+			if viewsErr != nil {
+				views = 0
+			}
+			tw.Views = views
 		}
 
 		for _, pinned := range timeline.GlobalObjects.Users[tweet.UserIDStr].PinnedTweetIdsStr {
-			if tweet.ConversationIDStr == pinned {
+			if tweet.IDStr == pinned {
 				tw.IsPin = true
 				break
 			}
@@ -200,9 +149,22 @@ func (timeline *timeline) parseTweet(id string) *Tweet {
 			tw.Hashtags = append(tw.Hashtags, hash.Text)
 		}
 
+		for _, mention := range tweet.Entities.UserMentions {
+			tw.Mentions = append(tw.Mentions, Mention{
+				ID:       mention.IDStr,
+				Username: mention.ScreenName,
+				Name:     mention.Name,
+			})
+		}
+
 		for _, media := range tweet.ExtendedEntities.Media {
 			if media.Type == "photo" {
-				tw.Photos = append(tw.Photos, media.MediaURLHttps)
+				photo := Photo{
+					ID:  media.IDStr,
+					URL: media.MediaURLHttps,
+				}
+
+				tw.Photos = append(tw.Photos, photo)
 			} else if media.Type == "video" {
 				video := Video{
 					ID:      media.IDStr,
@@ -217,7 +179,6 @@ func (timeline *timeline) parseTweet(id string) *Tweet {
 					}
 				}
 
-				tw.Photos = append(tw.Photos, video.Preview)
 				tw.Videos = append(tw.Videos, video)
 			}
 
@@ -259,7 +220,15 @@ func (timeline *timeline) parseTweet(id string) *Tweet {
 			}
 			return tco
 		})
-		for _, url := range tw.Photos {
+		for _, photo := range tw.Photos {
+			url := photo.URL
+			if stringInSlice(url, foundedMedia) {
+				continue
+			}
+			tw.HTML += fmt.Sprintf(`<br><img src="%s"/>`, url)
+		}
+		for _, video := range tw.Videos {
+			url := video.Preview
 			if stringInSlice(url, foundedMedia) {
 				continue
 			}
@@ -271,7 +240,7 @@ func (timeline *timeline) parseTweet(id string) *Tweet {
 	return nil
 }
 
-func (timeline *timeline) parseTweets() ([]*Tweet, string) {
+func (timeline *timelineV1) parseTweets() ([]*Tweet, string) {
 	var cursor string
 	var pinnedTweet *Tweet
 	var orderedTweets []*Tweet
@@ -299,7 +268,7 @@ func (timeline *timeline) parseTweets() ([]*Tweet, string) {
 	return orderedTweets, cursor
 }
 
-func (timeline *timeline) parseUsers() ([]*Profile, string) {
+func (timeline *timelineV1) parseUsers() ([]*Profile, string) {
 	users := make(map[string]Profile)
 
 	for id, user := range timeline.GlobalObjects.Users {

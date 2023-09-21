@@ -16,6 +16,75 @@ go get -u github.com/n0madic/twitter-scraper
 
 ## Usage
 
+### Authentication
+
+Now all methods require authentication!
+
+#### Login
+
+```golang
+err := scraper.Login("username", "password")
+```
+
+Use username to login, not email!
+But if you have email confirmation, use email address in addition:
+
+```golang
+err := scraper.Login("username", "password", "email")
+```
+
+If you have two-factor authentication, use code:
+
+```golang
+err := scraper.Login("username", "password", "code")
+```
+
+Status of login can be checked with:
+
+```golang
+scraper.IsLoggedIn()
+```
+
+Logout (clear session):
+
+```golang
+scraper.Logout()
+```
+
+If you want save session between restarts, you can save cookies with `scraper.GetCookies()` and restore with `scraper.SetCookies()`.
+
+For example, save cookies:
+
+```golang
+cookies := scraper.GetCookies()
+// serialize to JSON
+js, _ := json.Marshal(cookies)
+// save to file
+f, _ = os.Create("cookies.json")
+f.Write(js)
+```
+
+and load cookies:
+
+```golang
+f, _ := os.Open("cookies.json")
+// deserialize from JSON
+var cookies []*http.Cookie
+json.NewDecoder(f).Decode(&cookies)
+// load cookies
+scraper.SetCookies(cookies)
+// check login status
+scraper.IsLoggedIn()
+```
+
+#### Open account
+
+If you don't want to use your account, you can try login as a Twitter app:
+
+```golang
+err := scraper.LoginOpenAccount()
+```
+
 ### Get user tweets
 
 ```golang
@@ -29,7 +98,10 @@ import (
 
 func main() {
     scraper := twitterscraper.New()
-
+    err := scraper.LoginOpenAccount()
+    if err != nil {
+        panic(err)
+    }
     for tweet := range scraper.GetTweets(context.Background(), "Twitter", 50) {
         if tweet.Error != nil {
             panic(tweet.Error)
@@ -39,7 +111,7 @@ func main() {
 }
 ```
 
-It appears you can ask for up to 50 tweets (limit ~3200 tweets).
+It appears you can ask for up to 50 tweets.
 
 ### Get single tweet
 
@@ -54,6 +126,10 @@ import (
 
 func main() {
     scraper := twitterscraper.New()
+    err := scraper.Login(username, password)
+    if err != nil {
+        panic(err)
+    }
     tweet, err := scraper.GetTweet("1328684389388185600")
     if err != nil {
         panic(err)
@@ -63,6 +139,8 @@ func main() {
 ```
 
 ### Search tweets by query standard operators
+
+Now the search only works for authenticated users!
 
 Tweets containing “twitter” and “scraper” and “data“, filtering out retweets:
 
@@ -77,6 +155,10 @@ import (
 
 func main() {
     scraper := twitterscraper.New()
+    err := scraper.Login(username, password)
+    if err != nil {
+        panic(err)
+    }
     for tweet := range scraper.SearchTweets(context.Background(),
         "twitter scraper data -filter:retweets", 50) {
         if tweet.Error != nil {
@@ -118,6 +200,7 @@ import (
 
 func main() {
     scraper := twitterscraper.New()
+    scraper.LoginOpenAccount()
     profile, err := scraper.GetProfile("Twitter")
     if err != nil {
         panic(err)
@@ -139,6 +222,10 @@ import (
 
 func main() {
     scraper := twitterscraper.New().SetSearchMode(twitterscraper.SearchUsers)
+    err := scraper.Login(username, password)
+    if err != nil {
+        panic(err)
+    }
     for profile := range scraper.SearchProfiles(context.Background(), "Twitter", 50) {
         if profile.Error != nil {
             panic(profile.Error)
@@ -166,27 +253,6 @@ func main() {
     }
     fmt.Println(trends)
 }
-```
-
-### Use authentication
-
-Some specified user tweets are protected that you must login and follow.
-It is also required to search.
-
-```golang
-err := scraper.Login("username", "password")
-```
-
-Status of login can be checked with:
-
-```golang
-scraper.IsLoggedIn()
-```
-
-Logout (clear session):
-
-```golang
-scraper.Logout()
 ```
 
 ### Use Proxy
