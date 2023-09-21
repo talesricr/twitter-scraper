@@ -2,37 +2,23 @@ package twitterscraper_test
 
 import (
 	"context"
-	"os"
-	"strings"
 	"testing"
 
 	twitterscraper "github.com/n0madic/twitter-scraper"
 )
 
-var searchScraper = twitterscraper.New()
-
-func authSearchScraper() error {
-	if searchScraper.IsLoggedIn() {
-		return nil
-	}
-	return searchScraper.Login(os.Getenv("TWITTER_USERNAME"), os.Getenv("TWITTER_PASSWORD"))
-}
-
 func TestFetchSearchCursor(t *testing.T) {
-	err := authSearchScraper()
-	if err != nil {
-		t.Fatal(err)
+	if skipAuthTest {
+		t.Skip("Skipping test due to environment variable")
 	}
+
 	maxTweetsNbr := 150
 	tweetsNbr := 0
 	nextCursor := ""
 	for tweetsNbr < maxTweetsNbr {
-		tweets, cursor, err := searchScraper.FetchSearchTweets("twitter", maxTweetsNbr, nextCursor)
+		tweets, cursor, err := testScraper.FetchSearchTweets("twitter", maxTweetsNbr, nextCursor)
 		if err != nil {
 			t.Fatal(err)
-		}
-		if strings.HasPrefix(cursor, "scroll:") {
-			continue
 		}
 		if cursor == "" {
 			t.Fatal("Expected search cursor is empty")
@@ -43,14 +29,14 @@ func TestFetchSearchCursor(t *testing.T) {
 }
 
 func TestGetSearchProfiles(t *testing.T) {
+	if skipAuthTest {
+		t.Skip("Skipping test due to environment variable")
+	}
 	count := 0
 	maxProfilesNbr := 150
 	dupcheck := make(map[string]bool)
-	err := authSearchScraper()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for profile := range searchScraper.SearchProfiles(context.Background(), "Twitter", maxProfilesNbr) {
+	testScraper.SetSearchMode(twitterscraper.SearchUsers)
+	for profile := range testScraper.SearchProfiles(context.Background(), "Twitter", maxProfilesNbr) {
 		if profile.Error != nil {
 			t.Error(profile.Error)
 		} else {
@@ -72,14 +58,14 @@ func TestGetSearchProfiles(t *testing.T) {
 	}
 }
 func TestGetSearchTweets(t *testing.T) {
+	if skipAuthTest {
+		t.Skip("Skipping test due to environment variable")
+	}
 	count := 0
 	maxTweetsNbr := 150
 	dupcheck := make(map[string]bool)
-	err := authSearchScraper()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for tweet := range searchScraper.SearchTweets(context.Background(), "twitter", maxTweetsNbr) {
+	testScraper.SetSearchMode(twitterscraper.SearchLatest)
+	for tweet := range testScraper.SearchTweets(context.Background(), "twitter", maxTweetsNbr) {
 		if tweet.Error != nil {
 			t.Error(tweet.Error)
 		} else {

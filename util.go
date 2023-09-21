@@ -2,7 +2,10 @@ package twitterscraper
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,6 +16,7 @@ var (
 	reHashtag    = regexp.MustCompile(`\B(\#\S+\b)`)
 	reTwitterURL = regexp.MustCompile(`https:(\/\/t\.co\/([A-Za-z0-9]|[A-Za-z]){10})`)
 	reUsername   = regexp.MustCompile(`\B(\@\S{1,15}\b)`)
+	twURL        = urlParse("https://twitter.com")
 )
 
 func (s *Scraper) newRequest(method string, url string) (*http.Request, error) {
@@ -82,10 +86,6 @@ func getUserTimeline(ctx context.Context, query string, maxProfilesNbr int, fetc
 				break
 			}
 
-			if strings.HasPrefix(next, "scroll:") {
-				continue
-			}
-
 			for _, profile := range profiles {
 				select {
 				case <-ctx.Done():
@@ -131,10 +131,6 @@ func getTweetTimeline(ctx context.Context, query string, maxTweetsNbr int, fetch
 				break
 			}
 
-			if strings.HasPrefix(next, "scroll:") {
-				continue
-			}
-
 			for _, tweet := range tweets {
 				select {
 				case <-ctx.Done():
@@ -144,9 +140,6 @@ func getTweetTimeline(ctx context.Context, query string, maxTweetsNbr int, fetch
 				}
 
 				if tweetsNbr < maxTweetsNbr {
-					if tweet.IsPin && nextCursor != "" {
-						continue
-					}
 					nextCursor = next
 					channel <- &TweetResult{Tweet: *tweet}
 				} else {
@@ -157,6 +150,188 @@ func getTweetTimeline(ctx context.Context, query string, maxTweetsNbr int, fetch
 		}
 	}(query)
 	return channel
+}
+
+func parseLegacyTweet(user *legacyUser, tweet *legacyTweet) *Tweet {
+	tweetID := tweet.IDStr
+	if tweetID == "" {
+		return nil
+	}
+	username := user.ScreenName
+	name := user.Name
+	tw := &Tweet{
+		ConversationID: tweet.ConversationIDStr,
+		ID:             tweetID,
+		Likes:          tweet.FavoriteCount,
+		Name:           name,
+		PermanentURL:   fmt.Sprintf("https://twitter.com/%s/status/%s", username, tweetID),
+		Replies:        tweet.ReplyCount,
+		Retweets:       tweet.RetweetCount,
+		Text:           tweet.FullText,
+		UserID:         tweet.UserIDStr,
+		Username:       username,
+	}
+
+	tm, err := time.Parse(time.RubyDate, tweet.CreatedAt)
+	if err == nil {
+		tw.TimeParsed = tm
+		tw.Timestamp = tm.Unix()
+	}
+
+	if tweet.Place.ID != "" {
+		tw.Place = &tweet.Place
+	}
+
+	if tweet.QuotedStatusIDStr != "" {
+		tw.IsQuoted = true
+		tw.QuotedStatusID = tweet.QuotedStatusIDStr
+	}
+	if tweet.InReplyToStatusIDStr != "" {
+		tw.IsReply = true
+		tw.InReplyToStatusID = tweet.InReplyToStatusIDStr
+	}
+	if tweet.RetweetedStatusIDStr != "" || tweet.RetweetedStatusResult.Result != nil {
+		tw.IsRetweet = true
+		tw.RetweetedStatusID = tweet.RetweetedStatusIDStr
+		if tweet.RetweetedStatusResult.Result != nil {
+			tw.RetweetedStatus = parseLegacyTweet(&tweet.RetweetedStatusResult.Result.Core.UserResults.Result.Legacy, &tweet.RetweetedStatusResult.Result.Legacy)
+			tw.RetweetedStatusID = tw.RetweetedStatus.ID
+		}
+	}
+
+	if tweet.Views.Count != "" {
+		views, viewsErr := strconv.Atoi(tweet.Views.Count)
+		if viewsErr != nil {
+			views = 0
+		}
+		tw.Views = views
+	}
+
+	for _, pinned := range user.PinnedTweetIdsStr {
+		if tweet.IDStr == pinned {
+			tw.IsPin = true
+			break
+		}
+	}
+
+	for _, hash := range tweet.Entities.Hashtags {
+		tw.Hashtags = append(tw.Hashtags, hash.Text)
+	}
+
+	for _, mention := range tweet.Entities.UserMentions {
+		tw.Mentions = append(tw.Mentions, Mention{
+			ID:       mention.IDStr,
+			Username: mention.ScreenName,
+			Name:     mention.Name,
+		})
+	}
+
+	for _, media := range tweet.ExtendedEntities.Media {
+		if media.Type == "photo" {
+			photo := Photo{
+				ID:  media.IDStr,
+				URL: media.MediaURLHttps,
+			}
+
+			tw.Photos = append(tw.Photos, photo)
+		} else if media.Type == "video" {
+			video := Video{
+				ID:      media.IDStr,
+				Preview: media.MediaURLHttps,
+			}
+
+			maxBitrate := 0
+			for _, variant := range media.VideoInfo.Variants {
+				if variant.Bitrate > maxBitrate {
+					video.URL = strings.TrimSuffix(variant.URL, "?tag=10")
+					maxBitrate = variant.Bitrate
+				}
+			}
+
+			tw.Videos = append(tw.Videos, video)
+		} else if media.Type == "animated_gif" {
+			gif := GIF{
+				ID:      media.IDStr,
+				Preview: media.MediaURLHttps,
+			}
+
+			// Twitter's API doesn't provide bitrate for GIFs, (it's always set to zero).
+			// Therefore we check for `>=` instead of `>` in the loop below.
+			// Also, GIFs have just a single variant today. Just in case that changes in the future,
+			// and there will be multiple variants, we'll pick the one with the highest bitrate,
+			// if other one will have a non-zero bitrate.
+			maxBitrate := 0
+			for _, variant := range media.VideoInfo.Variants {
+				if variant.Bitrate >= maxBitrate {
+					gif.URL = variant.URL
+					maxBitrate = variant.Bitrate
+				}
+			}
+
+			tw.GIFs = append(tw.GIFs, gif)
+		}
+
+		if !tw.SensitiveContent {
+			sensitive := media.ExtSensitiveMediaWarning
+			tw.SensitiveContent = sensitive.AdultContent || sensitive.GraphicViolence || sensitive.Other
+		}
+	}
+
+	for _, url := range tweet.Entities.URLs {
+		tw.URLs = append(tw.URLs, url.ExpandedURL)
+	}
+
+	tw.HTML = tweet.FullText
+	tw.HTML = reHashtag.ReplaceAllStringFunc(tw.HTML, func(hashtag string) string {
+		return fmt.Sprintf(`<a href="https://twitter.com/hashtag/%s">%s</a>`,
+			strings.TrimPrefix(hashtag, "#"),
+			hashtag,
+		)
+	})
+	tw.HTML = reUsername.ReplaceAllStringFunc(tw.HTML, func(username string) string {
+		return fmt.Sprintf(`<a href="https://twitter.com/%s">%s</a>`,
+			strings.TrimPrefix(username, "@"),
+			username,
+		)
+	})
+	var foundedMedia []string
+	tw.HTML = reTwitterURL.ReplaceAllStringFunc(tw.HTML, func(tco string) string {
+		for _, entity := range tweet.Entities.URLs {
+			if tco == entity.URL {
+				return fmt.Sprintf(`<a href="%s">%s</a>`, entity.ExpandedURL, tco)
+			}
+		}
+		for _, entity := range tweet.ExtendedEntities.Media {
+			if tco == entity.URL {
+				foundedMedia = append(foundedMedia, entity.MediaURLHttps)
+				return fmt.Sprintf(`<br><a href="%s"><img src="%s"/></a>`, tco, entity.MediaURLHttps)
+			}
+		}
+		return tco
+	})
+	for _, photo := range tw.Photos {
+		url := photo.URL
+		if stringInSlice(url, foundedMedia) {
+			continue
+		}
+		tw.HTML += fmt.Sprintf(`<br><img src="%s"/>`, url)
+	}
+	for _, video := range tw.Videos {
+		url := video.Preview
+		if stringInSlice(url, foundedMedia) {
+			continue
+		}
+		tw.HTML += fmt.Sprintf(`<br><img src="%s"/>`, url)
+	}
+	for _, gif := range tw.GIFs {
+		url := gif.Preview
+		if stringInSlice(url, foundedMedia) {
+			continue
+		}
+		tw.HTML += fmt.Sprintf(`<br><img src="%s"/>`, url)
+	}
+	tw.HTML = strings.Replace(tw.HTML, "\n", "<br>", -1)
+	return tw
 }
 
 func parseProfile(user legacyUser) Profile {
@@ -193,6 +368,14 @@ func parseProfile(user legacyUser) Profile {
 	return profile
 }
 
+func mapToJSONString(data map[string]interface{}) string {
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return ""
+	}
+	return string(jsonBytes)
+}
+
 func stringInSlice(a string, list []string) bool {
 	for _, b := range list {
 		if b == a {
@@ -200,4 +383,12 @@ func stringInSlice(a string, list []string) bool {
 		}
 	}
 	return false
+}
+
+func urlParse(u string) *url.URL {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return nil
+	}
+	return parsed
 }

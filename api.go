@@ -3,7 +3,7 @@ package twitterscraper
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"time"
 )
@@ -23,15 +23,21 @@ func (s *Scraper) RequestAPI(req *http.Request, target interface{}) error {
 		}()
 	}
 
-	if !s.IsGuestToken() || s.guestCreatedAt.Before(time.Now().Add(-time.Hour*3)) {
-		err := s.GetGuestToken()
-		if err != nil {
-			return err
+	if !s.isLogged {
+		if !s.IsGuestToken() || s.guestCreatedAt.Before(time.Now().Add(-time.Hour*3)) {
+			err := s.GetGuestToken()
+			if err != nil {
+				return err
+			}
 		}
+		req.Header.Set("X-Guest-Token", s.guestToken)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+s.bearerToken)
-	req.Header.Set("X-Guest-Token", s.guestToken)
+	if s.oAuthToken != "" && s.oAuthSecret != "" {
+		req.Header.Set("Authorization", s.sign(req.Method, req.URL))
+	} else {
+		req.Header.Set("Authorization", "Bearer "+s.bearerToken)
+	}
 
 	for _, cookie := range s.client.Jar.Cookies(req.URL) {
 		if cookie.Name == "ct0" {
@@ -46,9 +52,12 @@ func (s *Scraper) RequestAPI(req *http.Request, target interface{}) error {
 	}
 	defer resp.Body.Close()
 
-	// private profiles return forbidden, but also data
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusForbidden {
-		content, _ := ioutil.ReadAll(resp.Body)
+	content, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("response status %s: %s", resp.Status, content)
 	}
 
@@ -56,13 +65,10 @@ func (s *Scraper) RequestAPI(req *http.Request, target interface{}) error {
 		s.guestToken = ""
 	}
 
-	b, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return err
+	if target == nil {
+		return nil
 	}
-	// fmt.Println(string(b))
-
-	return json.Unmarshal(b, target)
+	return json.Unmarshal(content, target)
 }
 
 // GetGuestToken from Twitter API
@@ -79,7 +85,7 @@ func (s *Scraper) GetGuestToken() error {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
